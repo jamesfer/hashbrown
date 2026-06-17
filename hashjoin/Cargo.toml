@@ -1,0 +1,72 @@
+[package]
+name = "hashbrown_hashjoin"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.83.0"
+
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true
+
+[[bin]]
+name = "new_map_2"
+path = "src/new_map_2/bin/new_map_2.rs"
+
+[[bin]]
+name = "normal_map"
+path = "src/new_map_2/bin/normal_map.rs"
+
+[[bin]]
+name = "compare_probe_chains"
+path = "src/new_map_2/bin/compare_probe_chains.rs"
+
+[[bin]]
+name = "compare_ideal_probe_chains"
+path = "src/new_map_2/bin/compare_ideal_probe_chains.rs"
+
+[[bin]]
+name = "simple"
+path = "src/new_map_2/bin/simple.rs"
+
+[[bin]]
+name = "build_new_map_3"
+path = "bin/build_new_map_3.rs"
+
+[[bench]]
+name = "build_time"
+harness = false
+
+[[bench]]
+name = "lookup_time"
+harness = false
+
+[[bench]]
+name = "lookup_time_single_threaded"
+harness = false
+
+[[bench]]
+name = "insert_time"
+harness = false
+
+[[bench]]
+name = "intrinsics"
+harness = false
+
+[[bench]]
+name = "simd_instructions"
+harness = false
+
+
+[dependencies]
+arrow = "43.0.0"
+tokio = { version = "1.38.1", features = ["sync", "rt", "macros", "rt-multi-thread", "time"] }
+hashbrown = { path = ".." }
+async-trait = "0.1.83"
+dashmap = { version = "6.1.0", features = ["raw-api"] }
+rand = "0.8.5"
+leapfrog = "0.3.0"
+
+[dev-dependencies]
+assertables = "9.5.0"
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }

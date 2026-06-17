@@ -3,50 +3,50 @@ use core::{fmt, mem};
 /// Single tag in a control group.
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct Tag(pub u8);
+pub(crate) struct Tag(pub u8);
 impl Tag {
     /// Control tag value for an empty bucket.
-    pub(crate) const EMPTY: Tag = Tag(0b1111_1111);
+    pub(crate) const EMPTY: Tag = Tag(0b0000_0000);
 
     /// Control tag value for a deleted bucket.
-    pub(crate) const DELETED: Tag = Tag(0b1000_0000);
+    pub(crate) const DELETED: Tag = Tag(0b0000_0001);
 
-    /// Checks whether a control tag represents a full bucket (top bit is clear).
+    /// Checks whether a control tag represents a full bucket.
     #[inline]
     pub(crate) const fn is_full(self) -> bool {
-        self.0 & 0x80 == 0
+        self.0 > Self::DELETED.0
     }
 
-    /// Checks whether a control tag represents a special value (top bit is set).
+    /// Checks whether a control tag represents a special value.
     #[inline]
     pub(crate) const fn is_special(self) -> bool {
-        self.0 & 0x80 != 0
+        self.0 <= Self::DELETED.0
     }
 
     /// Checks whether a special control value is EMPTY (just check 1 bit).
     #[inline]
     pub(crate) const fn special_is_empty(self) -> bool {
         debug_assert!(self.is_special());
-        self.0 & 0x01 != 0
+        self.0 & 0x01 == 0
     }
 
     /// Creates a control tag representing a full bucket with the given hash.
     #[inline]
     #[allow(clippy::cast_possible_truncation)]
-    pub const fn full(hash: u64) -> Tag {
-        // Constant for function that grabs the top 7 bits of the hash.
+    pub(crate) fn full(hash: u64) -> Tag {
+        // Constant for function that grabs the top 8 bits of the hash.
         const MIN_HASH_LEN: usize = if mem::size_of::<usize>() < mem::size_of::<u64>() {
             mem::size_of::<usize>()
         } else {
             mem::size_of::<u64>()
         };
 
-        // Grab the top 7 bits of the hash. While the hash is normally a full 64-bit
+        // Grab the top 8 bits of the hash. While the hash is normally a full 64-bit
         // value, some hash functions (such as FxHash) produce a usize result
         // instead, which means that the top 32 bits are 0 on 32-bit platforms.
         // So we use MIN_HASH_LEN constant to handle this.
-        let top7 = hash >> (MIN_HASH_LEN * 8 - 7);
-        Tag((top7 & 0x7f) as u8) // truncation
+        let top7 = hash >> (MIN_HASH_LEN * 8 - 8);
+        Tag((top7 as u8).max(Self::DELETED.0 + 1)) // truncation
     }
 }
 impl fmt::Debug for Tag {

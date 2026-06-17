@@ -89,12 +89,22 @@ impl<T> HashTable<T, Global> {
             raw: RawTable::with_capacity(capacity),
         }
     }
+
+    pub fn with_fixed_items(capacity: usize) -> Self {
+        Self {
+            raw: RawTable::with_fixed_items(capacity),
+        }
+    }
 }
 
 impl<T, A> HashTable<T, A>
 where
     A: Allocator,
 {
+    pub fn bucket_count(&self) -> usize {
+        self.raw.buckets()
+    }
+
     /// Creates an empty `HashTable` using the given allocator.
     ///
     /// The hash table is initially created with a capacity of 0, so it will not allocate until it
@@ -222,6 +232,10 @@ where
     /// ```
     pub fn find(&self, hash: u64, eq: impl FnMut(&T) -> bool) -> Option<&T> {
         self.raw.get(hash, eq)
+    }
+
+    pub fn find_index(&self, hash: u64, eq: impl FnMut(&T) -> bool) -> (Option<usize>, usize) {
+        self.raw.find_index(hash, eq)
     }
 
     /// Returns a mutable reference to an entry in the table with the given hash
@@ -413,6 +427,15 @@ where
             bucket,
             table: self,
         }
+    }
+
+    pub fn insert_directly(
+        &mut self,
+        hash: u64,
+        value: T,
+        index: usize,
+    ) {
+        self.raw.insert_directly(hash, value, index)
     }
 
     /// Clears the table, removing all values.

@@ -66,8 +66,9 @@ doc_comment::doctest!("../README.md");
 #[macro_use]
 mod macros;
 
-mod control;
-mod raw;
+pub mod control;
+mod control_extra;
+pub mod raw;
 mod util;
 
 mod external_trait_impls;

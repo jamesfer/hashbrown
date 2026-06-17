@@ -1,10 +1,11 @@
 mod bitmask;
-mod group;
-mod tag;
+pub mod group;
+pub mod tag;
 
 use self::bitmask::BitMask;
+pub use self::group::Group;
+pub use self::bitmask::BitMaskIter;
+pub use self::tag::Tag;
 pub(crate) use self::{
-    bitmask::BitMaskIter,
-    group::Group,
-    tag::{Tag, TagSliceExt},
+    tag::{TagSliceExt},
 };

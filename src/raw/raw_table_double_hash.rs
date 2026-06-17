@@ -10,12 +10,7 @@ use core::mem;
 use core::ptr::NonNull;
 use core::slice;
 use core::{hint, ptr};
-
-mod alloc;
-pub mod raw_table_double_hash;
-pub mod raw_table_extra_bit;
-
-pub(crate) use self::alloc::{do_alloc, Allocator, Global};
+use crate::raw::alloc::{do_alloc, Allocator, Global};
 
 #[inline]
 unsafe fn offset_from<T>(to: *const T, from: *const T) -> usize {
@@ -81,16 +76,29 @@ pub struct ProbeSeq {
 
 impl ProbeSeq {
     #[inline]
-    pub fn move_next(&mut self, bucket_mask: usize) {
+    pub fn move_next(&mut self, tag: Tag, bucket_mask: usize) {
         // We should have found an empty bucket by now and ended the probe.
-        debug_assert!(
-            self.stride <= bucket_mask,
-            "Went past end of probe sequence"
-        );
+        // debug_assert!(
+        //     self.stride <= bucket_mask,
+        //     "Went past end of probe sequence"
+        // );
 
-        self.stride += Group::WIDTH;
+
+        // let stride = (tag.0 | 1) as usize * Group::WIDTH;
+
+        // self.stride += Group::WIDTH;
+        if self.stride == 0 {
+            self.stride = (tag.0 * 2 + 1) as usize * Group::WIDTH;
+        }
+
         self.pos += self.stride;
         self.pos &= bucket_mask;
+    }
+
+    #[inline]
+    pub fn move_next_static(pos: usize, stride: usize, bucket_mask: usize) -> usize {
+        let pos = pos + stride;
+        pos & bucket_mask
     }
 }
 
@@ -549,7 +557,7 @@ impl<T> Bucket<T> {
 }
 
 /// A raw hash table with an unsafe API.
-pub struct RawTable<T, A: Allocator = Global> {
+pub struct RawTableDoubleHash<T, A: Allocator = Global> {
     table: RawTableInner,
     alloc: A,
     // Tell dropck that we own instances of T.
@@ -574,7 +582,7 @@ struct RawTableInner {
     items: usize,
 }
 
-impl<T> RawTable<T, Global> {
+impl<T> RawTableDoubleHash<T, Global> {
     /// Creates a new empty hash table without allocating any memory.
     ///
     /// In effect this returns a table with exactly 1 bucket. However we can
@@ -595,15 +603,9 @@ impl<T> RawTable<T, Global> {
     pub fn with_capacity(capacity: usize) -> Self {
         Self::with_capacity_in(capacity, Global)
     }
-
-    /// Allocates a new hash table with at least enough capacity for inserting
-    /// the given number of elements without reallocating.
-    pub fn with_fixed_items(capacity: usize) -> Self {
-        Self::with_capacity_and_fixed_items_in(capacity, Global)
-    }
 }
 
-impl<T, A: Allocator> RawTable<T, A> {
+impl<T, A: Allocator> RawTableDoubleHash<T, A> {
     const TABLE_LAYOUT: TableLayout = TableLayout::new::<T>();
 
     /// Creates a new empty hash table without allocating any memory, using the
@@ -650,20 +652,6 @@ impl<T, A: Allocator> RawTable<T, A> {
     pub fn with_capacity_in(capacity: usize, alloc: A) -> Self {
         Self {
             table: RawTableInner::with_capacity(&alloc, Self::TABLE_LAYOUT, capacity),
-            alloc,
-            marker: PhantomData,
-        }
-    }
-
-    /// Allocates a new hash table using the given allocator, with at least enough capacity for
-    /// inserting the given number of elements without reallocating.
-    pub fn with_capacity_and_fixed_items_in(capacity: usize, alloc: A) -> Self {
-        let mut inner = RawTableInner::with_capacity(&alloc, Self::TABLE_LAYOUT, capacity);
-        inner.items += capacity;
-        inner.growth_left -= capacity;
-
-        Self {
-            table: inner,
             alloc,
             marker: PhantomData,
         }
@@ -751,7 +739,7 @@ impl<T, A: Allocator> RawTable<T, A> {
     /// not be greater than the number returned by the [`RawTable::buckets`] function, i.e.
     /// `(index + 1) <= self.buckets()`.
     ///
-    /// [`RawTable::buckets`]: RawTable::buckets
+    /// [`RawTable::buckets`]: RawTableDoubleHash::buckets
     /// [`undefined behavior`]: https://doc.rust-lang.org/reference/behavior-considered-undefined.html
     #[inline]
     pub unsafe fn bucket(&self, index: usize) -> Bucket<T> {
@@ -1067,43 +1055,6 @@ impl<T, A: Allocator> RawTable<T, A> {
         }
     }
 
-    // Writes a value directly to a particular index in the table, without checking whether this is
-    // the correct place to put the item, or that the new entry won't overwrite an existing item.
-    // Returns an error if the index is out of bounds, or the table is full.
-    pub fn insert_directly(&mut self, hash: u64, value: T, index: usize) {
-        unsafe {
-            // Divide index by the group size (8), then ensure that it fits within the number of
-            // buckets
-            // if unlikely((index >> 3) & self.table.bucket_mask != (index >> 3)) {
-            //     println!("index out of bounds, index: {}, bucket_mask: {}", index, self.table.bucket_mask);
-            //     return Err(());
-            // }
-
-            // SAFETY:
-            // 1. The [`RawTableInner`] must already have properly initialized control bytes since
-            //    we will never expose `RawTable::new_uninitialized` in a public API.
-            //
-            // 2. We reserve additional space (if necessary) right after calling this function.
-            // let mut slot = self.table.find_insert_slot(hash);
-            let mut slot = InsertSlot { index };
-
-            // // We can avoid growing the table once we have reached our load factor if we are replacing
-            // // a tombstone. This works since the number of EMPTY slots does not change in this case.
-            // //
-            // // SAFETY: The function is guaranteed to return [`InsertSlot`] that contains an index
-            // // in the range `0..=self.buckets()`.
-            // let old_ctrl = *self.table.ctrl(slot.index);
-            // if unlikely(self.table.growth_left == 0 && old_ctrl.special_is_empty()) {
-            //     // This method doesn't grow the table if we can't fit the item in
-            //     return Err(());
-            // }
-
-            // This modifies the length and remaining growth variables, which would be unsafe to do
-            // in parallel.
-            self.insert_in_slot_without_updating_count(hash, slot, value);
-        }
-    }
-
     pub fn get_bucket_mask(&self) -> usize {
         self.table.bucket_mask
     }
@@ -1215,15 +1166,6 @@ impl<T, A: Allocator> RawTable<T, A> {
         bucket
     }
 
-    pub unsafe fn insert_in_slot_without_updating_count(&mut self, hash: u64, slot: InsertSlot, value: T) -> Bucket<T> {
-        let old_ctrl = *self.table.ctrl(slot.index);
-        self.table.record_item_insert_at_without_updating_count(slot.index, old_ctrl, hash);
-
-        let bucket = self.bucket(slot.index);
-        bucket.write(value);
-        bucket
-    }
-
     /// Searches for an element in the table.
     #[inline]
     pub fn find(&self, hash: u64, mut eq: impl FnMut(&T) -> bool) -> Option<Bucket<T>> {
@@ -1266,30 +1208,6 @@ impl<T, A: Allocator> RawTable<T, A> {
                 Some(index) => (Some(self.bucket(index)), chunks_accessed, false_positives),
                 None => (None, chunks_accessed, false_positives),
             }
-        }
-    }
-
-    /// Searches for an element in the table.
-    #[inline]
-    pub fn find_index(&self, hash: u64, mut eq: impl FnMut(&T) -> bool) -> (Option<usize>, usize) {
-        unsafe {
-            // SAFETY:
-            // 1. The [`RawTableInner`] must already have properly initialized control bytes since we
-            //    will never expose `RawTable::new_uninitialized` in a public API.
-            // 1. The `find_inner` function returns the `index` of only the full bucket, which is in
-            //    the range `0..self.buckets()`, so calling `self.bucket(index)` and `Bucket::as_ref`
-            //    is safe.
-            let (result, chain) = self
-                .table
-                .find_inner_lookup_chain(hash, &mut |index| eq(self.bucket(index).as_ref()));
-
-            // Avoid `Option::map` because it bloats LLVM IR.
-            (result, chain)
-            // match result {
-            //     // SAFETY: See explanation above.
-            //     Some(index) => Some(index),
-            //     None => None,
-            // }
         }
     }
 
@@ -1505,13 +1423,13 @@ impl<T, A: Allocator> RawTable<T, A> {
     }
 }
 
-unsafe impl<T, A: Allocator> Send for RawTable<T, A>
+unsafe impl<T, A: Allocator> Send for RawTableDoubleHash<T, A>
 where
     T: Send,
     A: Send,
 {
 }
-unsafe impl<T, A: Allocator> Sync for RawTable<T, A>
+unsafe impl<T, A: Allocator> Sync for RawTableDoubleHash<T, A>
 where
     T: Sync,
     A: Sync,
@@ -1782,7 +1700,7 @@ impl RawTableInner {
         let mut insert_slot = None;
 
         let tag_hash = Tag::full(hash);
-        let mut probe_seq = self.probe_seq(hash);
+        let mut probe_seq = self.probe_seq(hash, tag_hash);
 
         loop {
             // SAFETY:
@@ -1831,7 +1749,7 @@ impl RawTableInner {
                 }
             }
 
-            probe_seq.move_next(self.bucket_mask);
+            probe_seq.move_next(tag_hash, self.bucket_mask);
         }
     }
 
@@ -1880,7 +1798,7 @@ impl RawTableInner {
     /// field, and do not change it if the old control byte was [`Tag::DELETED`].
     ///
     /// See also [`Bucket::as_ptr`] method, for more information about of properly removing
-    /// or saving `element` from / into the [`RawTable`] / [`RawTableInner`].
+    /// or saving `element` from / into the [`RawTableDoubleHash`] / [`RawTableInner`].
     ///
     /// [`Bucket::as_ptr`]: Bucket::as_ptr
     /// [`undefined behavior`]: https://doc.rust-lang.org/reference/behavior-considered-undefined.html
@@ -1932,7 +1850,7 @@ impl RawTableInner {
     /// [`undefined behavior`]: https://doc.rust-lang.org/reference/behavior-considered-undefined.html
     #[inline]
     unsafe fn find_insert_slot(&self, hash: u64) -> InsertSlot {
-        let mut probe_seq = self.probe_seq(hash);
+        let mut probe_seq = self.probe_seq(hash, Tag::full(hash));
         loop {
             // SAFETY:
             // * Caller of this function ensures that the control bytes are properly initialized.
@@ -1961,7 +1879,7 @@ impl RawTableInner {
                     return self.fix_insert_slot(index.unwrap_unchecked());
                 }
             }
-            probe_seq.move_next(self.bucket_mask);
+            probe_seq.move_next(Tag::full(hash), self.bucket_mask);
         }
     }
 
@@ -1990,7 +1908,31 @@ impl RawTableInner {
     #[inline(always)]
     unsafe fn find_inner(&self, hash: u64, eq: &mut dyn FnMut(usize) -> bool) -> Option<usize> {
         let tag_hash = Tag::full(hash);
-        let mut probe_seq = self.probe_seq(hash);
+        // let mut probe_seq = self.probe_seq(hash, tag_hash);
+        let mut index = self.probe_seq_start(hash);
+
+        // Unroll the first iteration of the loop
+
+        let group = unsafe { Group::load(self.ctrl(index)) };
+
+        for bit in group.match_tag(tag_hash) {
+            // This is the same as `(probe_seq.pos + bit) % self.buckets()` because the number
+            // of buckets is a power of two, and `self.bucket_mask = self.buckets() - 1`.
+            let index = (index + bit) & self.bucket_mask;
+
+            if likely(eq(index)) {
+                return Some(index);
+            }
+        }
+
+        if likely(group.match_empty().any_bit_set()) {
+            return None;
+        }
+
+
+        // Now calculate the stride
+        let stride = self.probe_seq_stride(tag_hash);
+        index = ProbeSeq::move_next_static(index, stride, self.bucket_mask);
 
         loop {
             // SAFETY:
@@ -2007,12 +1949,12 @@ impl RawTableInner {
             // * Also, even if `RawTableInner` is not already allocated, `ProbeSeq.pos` will
             //   always return "0" (zero), so Group::load will read unaligned `Group::static_empty()`
             //   bytes, which is safe (see RawTableInner::new_in).
-            let group = unsafe { Group::load(self.ctrl(probe_seq.pos)) };
+            let group = unsafe { Group::load(self.ctrl(index)) };
 
             for bit in group.match_tag(tag_hash) {
                 // This is the same as `(probe_seq.pos + bit) % self.buckets()` because the number
                 // of buckets is a power of two, and `self.bucket_mask = self.buckets() - 1`.
-                let index = (probe_seq.pos + bit) & self.bucket_mask;
+                let index = (index + bit) & self.bucket_mask;
 
                 if likely(eq(index)) {
                     return Some(index);
@@ -2023,14 +1965,15 @@ impl RawTableInner {
                 return None;
             }
 
-            probe_seq.move_next(self.bucket_mask);
+            // probe_seq.move_next(tag_hash, self.bucket_mask);
+            index = ProbeSeq::move_next_static(index, stride, self.bucket_mask);
         }
     }
 
     #[inline(always)]
     unsafe fn find_inner_with_stats(&self, hash: u64, eq: &mut dyn FnMut(usize) -> bool) -> (Option<usize>, usize, usize) {
         let tag_hash = Tag::full(hash);
-        let mut probe_seq = self.probe_seq(hash);
+        let mut probe_seq = self.probe_seq(hash, tag_hash);
 
         let mut probe_length = 0;
         let mut tags_false_positives = 0;
@@ -2068,7 +2011,7 @@ impl RawTableInner {
                 return (None, probe_length, tags_false_positives);
             }
 
-            probe_seq.move_next(self.bucket_mask);
+            probe_seq.move_next(tag_hash, self.bucket_mask);
             probe_length += 1;
         }
     }
@@ -2076,7 +2019,7 @@ impl RawTableInner {
     unsafe fn find_inner_lookup_chain(&self, hash: u64, eq: &mut dyn FnMut(usize) -> bool) -> (Option<usize>, usize) {
         let mut last_looked_in = 0;
         let tag_hash = Tag::full(hash);
-        let mut probe_seq = self.probe_seq(hash);
+        let mut probe_seq = self.probe_seq(hash, tag_hash);
 
         loop {
             // SAFETY:
@@ -2110,7 +2053,7 @@ impl RawTableInner {
                 return (None, last_looked_in);
             }
 
-            probe_seq.move_next(self.bucket_mask);
+            probe_seq.move_next(tag_hash, self.bucket_mask);
         }
     }
 
@@ -2143,7 +2086,7 @@ impl RawTableInner {
     /// [`undefined behavior`].
     ///
     /// See also [`Bucket::as_ptr`] method, for more information about of properly removing
-    /// or saving `data element` from / into the [`RawTable`] / [`RawTableInner`].
+    /// or saving `data element` from / into the [`RawTableDoubleHash`] / [`RawTableInner`].
     ///
     /// [`Bucket::as_ptr`]: Bucket::as_ptr
     /// [`undefined behavior`]: https://doc.rust-lang.org/reference/behavior-considered-undefined.html
@@ -2269,7 +2212,7 @@ impl RawTableInner {
     /// data but with `Full` control bytes if `self.items == 0`.
     ///
     /// See also [`Bucket::drop`] / [`Bucket::as_ptr`] methods, for more information
-    /// about of properly removing or saving `element` from / into the [`RawTable`] /
+    /// about of properly removing or saving `element` from / into the [`RawTableDoubleHash`] /
     /// [`RawTableInner`].
     ///
     /// [`Bucket::drop`]: Bucket::drop
@@ -2374,7 +2317,7 @@ impl RawTableInner {
     /// not been allocated, but using the returned [`Bucket`] results in [`undefined behavior`].
     ///
     /// If `mem::size_of::<T>() == 0`, then the only requirement is that the `index` must
-    /// not be greater than the number returned by the [`RawTable::buckets`] function, i.e.
+    /// not be greater than the number returned by the [`RawTableDoubleHash::buckets`] function, i.e.
     /// `(index + 1) <= self.buckets()`.
     ///
     /// ```none
@@ -2514,13 +2457,25 @@ impl RawTableInner {
     /// group exactly once. The loop using `probe_seq` must terminate upon
     /// reaching a group containing an empty bucket.
     #[inline]
-    fn probe_seq(&self, hash: u64) -> ProbeSeq {
+    fn probe_seq(&self, hash: u64, tag: Tag) -> ProbeSeq {
         ProbeSeq {
             // This is the same as `hash as usize % self.buckets()` because the number
             // of buckets is a power of two, and `self.bucket_mask = self.buckets() - 1`.
             pos: h1(hash) & self.bucket_mask,
             stride: 0,
         }
+    }
+
+    #[inline]
+    fn probe_seq_start(&self, hash: u64) -> usize {
+        // This is the same as `hash as usize % self.buckets()` because the number
+        // of buckets is a power of two, and `self.bucket_mask = self.buckets() - 1`.
+        h1(hash) & self.bucket_mask
+    }
+
+    #[inline]
+    fn probe_seq_stride(&self, tag: Tag) -> usize {
+        (tag.0 * 2 + 1) as usize * Group::WIDTH
     }
 
     #[inline]
@@ -2539,7 +2494,7 @@ impl RawTableInner {
 
     #[inline]
     fn is_in_same_group(&self, i: usize, new_i: usize, hash: u64) -> bool {
-        let probe_seq_pos = self.probe_seq(hash).pos;
+        let probe_seq_pos = self.probe_seq(hash, Tag::full(hash)).pos;
         let probe_index =
             |pos: usize| (pos.wrapping_sub(probe_seq_pos) & self.bucket_mask) / Group::WIDTH;
         probe_index(i) == probe_index(new_i)
@@ -2566,7 +2521,7 @@ impl RawTableInner {
     /// Calling this function on a table that has not been allocated results in [`undefined behavior`].
     ///
     /// See also [`Bucket::as_ptr`] method, for more information about of properly removing
-    /// or saving `data element` from / into the [`RawTable`] / [`RawTableInner`].
+    /// or saving `data element` from / into the [`RawTableDoubleHash`] / [`RawTableInner`].
     ///
     /// [`RawTableInner::set_ctrl`]: RawTableInner::set_ctrl
     /// [`RawTableInner::buckets`]: RawTableInner::buckets
@@ -2600,7 +2555,7 @@ impl RawTableInner {
     /// Calling this function on a table that has not been allocated results in [`undefined behavior`].
     ///
     /// See also [`Bucket::as_ptr`] method, for more information about of properly removing
-    /// or saving `data element` from / into the [`RawTable`] / [`RawTableInner`].
+    /// or saving `data element` from / into the [`RawTableDoubleHash`] / [`RawTableInner`].
     ///
     /// [`RawTableInner::set_ctrl_hash`]: RawTableInner::set_ctrl_hash
     /// [`RawTableInner::buckets`]: RawTableInner::buckets
@@ -2633,7 +2588,7 @@ impl RawTableInner {
     /// Calling this function on a table that has not been allocated results in [`undefined behavior`].
     ///
     /// See also [`Bucket::as_ptr`] method, for more information about of properly removing
-    /// or saving `data element` from / into the [`RawTable`] / [`RawTableInner`].
+    /// or saving `data element` from / into the [`RawTableDoubleHash`] / [`RawTableInner`].
     ///
     /// [`RawTableInner::buckets`]: RawTableInner::buckets
     /// [`Bucket::as_ptr`]: Bucket::as_ptr
@@ -2690,7 +2645,7 @@ impl RawTableInner {
     /// for read-only purpose.
     ///
     /// See also [`Bucket::as_ptr()`] method, for more information about of properly removing
-    /// or saving `data element` from / into the [`RawTable`] / [`RawTableInner`].
+    /// or saving `data element` from / into the [`RawTableDoubleHash`] / [`RawTableInner`].
     ///
     /// [`Bucket::as_ptr()`]: Bucket::as_ptr()
     /// [`Undefined Behavior`]: https://doc.rust-lang.org/reference/behavior-considered-undefined.html
@@ -3276,7 +3231,7 @@ impl RawTableInner {
     /// (`self.items -= 1 cause overflow when self.items == 0`).
     ///
     /// See also [`Bucket::as_ptr`] method, for more information about of properly removing
-    /// or saving `data element` from / into the [`RawTable`] / [`RawTableInner`].
+    /// or saving `data element` from / into the [`RawTableDoubleHash`] / [`RawTableInner`].
     ///
     /// [`RawTableInner::buckets`]: RawTableInner::buckets
     /// [`Bucket::as_ptr`]: Bucket::as_ptr
@@ -3342,7 +3297,7 @@ impl RawTableInner {
     }
 }
 
-impl<T: Clone, A: Allocator + Clone> Clone for RawTable<T, A> {
+impl<T: Clone, A: Allocator + Clone> Clone for RawTableDoubleHash<T, A> {
     fn clone(&self) -> Self {
         if self.table.is_empty_singleton() {
             Self::new_in(self.alloc.clone())
@@ -3447,7 +3402,7 @@ impl<T: Clone, A: Allocator + Clone> Clone for RawTable<T, A> {
 trait RawTableClone {
     unsafe fn clone_from_spec(&mut self, source: &Self);
 }
-impl<T: Clone, A: Allocator + Clone> RawTableClone for RawTable<T, A> {
+impl<T: Clone, A: Allocator + Clone> RawTableClone for RawTableDoubleHash<T, A> {
     default_fn! {
         #[cfg_attr(feature = "inline-more", inline)]
         unsafe fn clone_from_spec(&mut self, source: &Self) {
@@ -3456,7 +3411,7 @@ impl<T: Clone, A: Allocator + Clone> RawTableClone for RawTable<T, A> {
     }
 }
 #[cfg(feature = "nightly")]
-impl<T: Copy, A: Allocator + Clone> RawTableClone for RawTable<T, A> {
+impl<T: Copy, A: Allocator + Clone> RawTableClone for RawTableDoubleHash<T, A> {
     #[cfg_attr(feature = "inline-more", inline)]
     unsafe fn clone_from_spec(&mut self, source: &Self) {
         source
@@ -3473,7 +3428,7 @@ impl<T: Copy, A: Allocator + Clone> RawTableClone for RawTable<T, A> {
     }
 }
 
-impl<T: Clone, A: Allocator + Clone> RawTable<T, A> {
+impl<T: Clone, A: Allocator + Clone> RawTableDoubleHash<T, A> {
     /// Common code for `clone` and `clone_from`. Assumes:
     /// - `self.buckets() == source.buckets()`.
     /// - Any existing elements have been dropped.
@@ -3516,7 +3471,7 @@ impl<T: Clone, A: Allocator + Clone> RawTable<T, A> {
     }
 }
 
-impl<T, A: Allocator + Default> Default for RawTable<T, A> {
+impl<T, A: Allocator + Default> Default for RawTableDoubleHash<T, A> {
     #[inline]
     fn default() -> Self {
         Self::new_in(Default::default())
@@ -3524,7 +3479,7 @@ impl<T, A: Allocator + Default> Default for RawTable<T, A> {
 }
 
 #[cfg(feature = "nightly")]
-unsafe impl<#[may_dangle] T, A: Allocator> Drop for RawTable<T, A> {
+unsafe impl<#[may_dangle] T, A: Allocator> Drop for RawTableDoubleHash<T, A> {
     #[cfg_attr(feature = "inline-more", inline)]
     fn drop(&mut self) {
         unsafe {
@@ -3541,7 +3496,7 @@ unsafe impl<#[may_dangle] T, A: Allocator> Drop for RawTable<T, A> {
     }
 }
 #[cfg(not(feature = "nightly"))]
-impl<T, A: Allocator> Drop for RawTable<T, A> {
+impl<T, A: Allocator> Drop for RawTableDoubleHash<T, A> {
     #[cfg_attr(feature = "inline-more", inline)]
     fn drop(&mut self) {
         unsafe {
@@ -3558,7 +3513,7 @@ impl<T, A: Allocator> Drop for RawTable<T, A> {
     }
 }
 
-impl<T, A: Allocator> IntoIterator for RawTable<T, A> {
+impl<T, A: Allocator> IntoIterator for RawTableDoubleHash<T, A> {
     type Item = T;
     type IntoIter = RawIntoIter<T, A>;
 
@@ -3725,7 +3680,7 @@ impl<T> RawIterRange<T> {
     /// If any of the following conditions are violated, the result is
     /// [`Undefined Behavior`]:
     ///
-    /// * The [`RawTableInner`] / [`RawTable`] must be alive and not moved,
+    /// * The [`RawTableInner`] / [`RawTableDoubleHash`] must be alive and not moved,
     ///   i.e. table outlives the `RawIterRange`;
     ///
     /// * The provided `n` value must match the actual number of items
@@ -3954,7 +3909,7 @@ impl FullBucketsIndices {
     /// If any of the following conditions are violated, the result is
     /// [`Undefined Behavior`]:
     ///
-    /// * The [`RawTableInner`] / [`RawTable`] must be alive and not moved,
+    /// * The [`RawTableInner`] / [`RawTableDoubleHash`] must be alive and not moved,
     ///   i.e. table outlives the `FullBucketsIndices`;
     ///
     /// * It never tries to iterate after getting all elements.
@@ -4132,7 +4087,7 @@ pub struct RawDrain<'a, T, A: Allocator = Global> {
 
     // We don't use a &'a mut RawTable<T> because we want RawDrain to be
     // covariant over T.
-    marker: PhantomData<&'a RawTable<T, A>>,
+    marker: PhantomData<&'a RawTableDoubleHash<T, A>>,
 }
 
 impl<T, A: Allocator> RawDrain<'_, T, A> {
@@ -4237,7 +4192,7 @@ struct RawIterHashInner {
 
 impl<T> RawIterHash<T> {
     #[cfg_attr(feature = "inline-more", inline)]
-    unsafe fn new<A: Allocator>(table: &RawTable<T, A>, hash: u64) -> Self {
+    unsafe fn new<A: Allocator>(table: &RawTableDoubleHash<T, A>, hash: u64) -> Self {
         RawIterHash {
             inner: RawIterHashInner::new(&table.table, hash),
             _marker: PhantomData,
@@ -4270,7 +4225,7 @@ impl RawIterHashInner {
     #[cfg_attr(feature = "inline-more", inline)]
     unsafe fn new(table: &RawTableInner, hash: u64) -> Self {
         let tag_hash = Tag::full(hash);
-        let probe_seq = table.probe_seq(hash);
+        let probe_seq = table.probe_seq(hash, tag_hash);
         let group = Group::load(table.ctrl(probe_seq.pos));
         let bitmask = group.match_tag(tag_hash).into_iter();
 
@@ -4317,7 +4272,7 @@ impl Iterator for RawIterHashInner {
                 if likely(self.group.match_empty().any_bit_set()) {
                     return None;
                 }
-                self.probe_seq.move_next(self.bucket_mask);
+                self.probe_seq.move_next(self.tag_hash, self.bucket_mask);
 
                 // Can't use `RawTableInner::ctrl` here as we don't have
                 // an actual `RawTableInner` reference to use.
@@ -4334,7 +4289,7 @@ impl Iterator for RawIterHashInner {
 
 pub(crate) struct RawExtractIf<'a, T, A: Allocator> {
     pub iter: RawIter<T>,
-    pub table: &'a mut RawTable<T, A>,
+    pub table: &'a mut RawTableDoubleHash<T, A>,
 }
 
 impl<T, A: Allocator> RawExtractIf<'_, T, A> {
@@ -4358,7 +4313,7 @@ impl<T, A: Allocator> RawExtractIf<'_, T, A> {
 mod test_map {
     use super::*;
 
-    fn rehash_in_place<T>(table: &mut RawTable<T>, hasher: impl Fn(&T) -> u64) {
+    fn rehash_in_place<T>(table: &mut RawTableDoubleHash<T>, hasher: impl Fn(&T) -> u64) {
         unsafe {
             table.table.rehash_in_place(
                 &|table, index| hasher(table.bucket::<T>(index).as_ref()),
@@ -4374,7 +4329,7 @@ mod test_map {
 
     #[test]
     fn rehash() {
-        let mut table = RawTable::new();
+        let mut table = RawTableDoubleHash::new();
         let hasher = |i: &u64| *i;
         for i in 0..100 {
             table.insert(i, i, hasher);
@@ -4406,7 +4361,7 @@ mod test_map {
         let table = unsafe {
             // SAFETY: The `buckets` is power of two and we're not
             // trying to actually use the returned RawTable.
-            RawTable::<(u64, Vec<i32>)>::new_uninitialized(Global, 8, Fallibility::Infallible)
+            RawTableDoubleHash::<(u64, Vec<i32>)>::new_uninitialized(Global, 8, Fallibility::Infallible)
                 .unwrap()
         };
         drop(table);
@@ -4421,7 +4376,7 @@ mod test_map {
             // SAFETY: The `buckets` is power of two and we're not
             // trying to actually use the returned RawTable.
             let mut table =
-                RawTable::<(u64, Vec<i32>)>::new_uninitialized(Global, 8, Fallibility::Infallible)
+                RawTableDoubleHash::<(u64, Vec<i32>)>::new_uninitialized(Global, 8, Fallibility::Infallible)
                     .unwrap();
 
             // WE SIMULATE, AS IT WERE, A FULL TABLE.
@@ -4528,7 +4483,7 @@ mod test_map {
 
         let dropped: Arc<AtomicI8> = Arc::new(AtomicI8::new(2));
 
-        let mut table = RawTable::new_in(MyAlloc {
+        let mut table = RawTableDoubleHash::new_in(MyAlloc {
             _inner: Arc::new(MyAllocInner {
                 drop_count: dropped.clone(),
             }),
@@ -4557,7 +4512,7 @@ mod test_map {
                 let armed_flags = [
                     DISARMED, DISARMED, ARMED, DISARMED, DISARMED, DISARMED, DISARMED,
                 ];
-                let mut scope_table = RawTable::new_in(MyAlloc {
+                let mut scope_table = RawTableDoubleHash::new_in(MyAlloc {
                     _inner: Arc::new(MyAllocInner {
                         drop_count: dropped.clone(),
                     }),

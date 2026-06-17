@@ -14,7 +14,7 @@ pub(crate) const BITMASK_ITER_MASK: BitMaskWord = 0x8080_8080_8080_8080;
 ///
 /// This implementation uses a 64-bit NEON value.
 #[derive(Copy, Clone)]
-pub struct Group(neon::uint8x8_t);
+pub(crate) struct Group(neon::uint8x8_t);
 
 #[allow(clippy::use_self)]
 impl Group {
@@ -42,7 +42,7 @@ impl Group {
     /// Loads a group of tags starting at the given address.
     #[inline]
     #[allow(clippy::cast_ptr_alignment)] // unaligned load
-    pub unsafe fn load(ptr: *const Tag) -> Self {
+    pub(crate) unsafe fn load(ptr: *const Tag) -> Self {
         Group(neon::vld1_u8(ptr.cast()))
     }
 
@@ -67,7 +67,7 @@ impl Group {
     /// Returns a `BitMask` indicating all tags in the group which *may*
     /// have the given value.
     #[inline]
-    pub fn match_tag(self, tag: Tag) -> BitMask {
+    pub(crate) fn match_tag(self, tag: Tag) -> BitMask {
         unsafe {
             let cmp = neon::vceq_u8(self.0, neon::vdup_n_u8(tag.0));
             BitMask(neon::vget_lane_u64(neon::vreinterpret_u64_u8(cmp), 0))
@@ -77,7 +77,7 @@ impl Group {
     /// Returns a `BitMask` indicating all tags in the group which are
     /// `EMPTY`.
     #[inline]
-    pub fn match_empty(self) -> BitMask {
+    pub(crate) fn match_empty(self) -> BitMask {
         self.match_tag(Tag::EMPTY)
     }
 
@@ -86,7 +86,7 @@ impl Group {
     #[inline]
     pub(crate) fn match_empty_or_deleted(self) -> BitMask {
         unsafe {
-            let cmp = neon::vcltz_s8(neon::vreinterpret_s8_u8(self.0));
+            let cmp = neon::vcle_u8(self.0, neon::vdup_n_u8(Tag::DELETED.0));
             BitMask(neon::vget_lane_u64(neon::vreinterpret_u64_u8(cmp), 0))
         }
     }
@@ -95,8 +95,10 @@ impl Group {
     #[inline]
     pub(crate) fn match_full(self) -> BitMask {
         unsafe {
-            let cmp = neon::vcgez_s8(neon::vreinterpret_s8_u8(self.0));
+            let cmp = neon::vcgt_u8(self.0, neon::vdup_n_u8(Tag::DELETED.0));
             BitMask(neon::vget_lane_u64(neon::vreinterpret_u64_u8(cmp), 0))
+            // let cmp = neon::vcgez_s8(neon::vreinterpret_s8_u8(self.0));
+            // BitMask(neon::vget_lane_u64(neon::vreinterpret_u64_u8(cmp), 0))
         }
     }
 
@@ -114,7 +116,8 @@ impl Group {
         //   1111_1111 | 1000_0000 = 1111_1111
         //   0000_0000 | 1000_0000 = 1000_0000
         unsafe {
-            let special = neon::vcltz_s8(neon::vreinterpret_s8_u8(self.0));
+            let special = neon::vcle_u8(self.0, neon::vdup_n_u8(Tag::DELETED.0));
+            // let special = neon::vcltz_s8(neon::vreinterpret_s8_u8(self.0));
             Group(neon::vorr_u8(special, neon::vdup_n_u8(0x80)))
         }
     }

@@ -19,7 +19,7 @@ use super::group::{
 /// is set per element. This is done by applying `BITMASK_ITER_MASK` on the
 /// mask bits.
 #[derive(Copy, Clone)]
-pub struct BitMask(pub(crate) BitMaskWord);
+pub(crate) struct BitMask(pub(crate) BitMaskWord);
 
 #[allow(clippy::use_self)]
 impl BitMask {
@@ -40,7 +40,7 @@ impl BitMask {
 
     /// Returns whether the `BitMask` has at least one set bit.
     #[inline]
-    pub fn any_bit_set(self) -> bool {
+    pub(crate) fn any_bit_set(self) -> bool {
         self.0 != 0
     }
 
@@ -103,7 +103,7 @@ impl IntoIterator for BitMask {
 /// Iterator over the contents of a `BitMask`, returning the indices of set
 /// bits.
 #[derive(Clone)]
-pub struct BitMaskIter(pub(crate) BitMask);
+pub(crate) struct BitMaskIter(pub(crate) BitMask);
 
 impl Iterator for BitMaskIter {
     type Item = usize;
